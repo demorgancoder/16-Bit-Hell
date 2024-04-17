@@ -58,6 +58,8 @@ IRQBRK EmptyHandler
 .define PalAndMapBank $7e0102
 .define LastPictureBank 86
 .define PalPlusMapSize 2080
+.define FirstTilBank 07
+.define GoingForward $7e0089
 
 .BANK 0 SLOT 0
 .ORG $0
@@ -154,6 +156,8 @@ Start:
     sta         $2132                   ; color data for addition/subtraction
     lda         #$00
     sta         $2133                   ; screen setting (interlace x,y/enable SFX data)
+    lda         #$00
+    sta         $4016
     sta         $4200                   ; enable v-blank, interrupt, joypad register
     lda         #$FF
     sta         $4201                   ; programmable I/O port
@@ -197,6 +201,8 @@ Start:
     sta.l PalAndMapSectionWithinBank 
     lda #FirstTileDataSection            
     sta TileDataSection
+    lda #$02
+    sta GoingForward
     jsr DisplayPicture                  ; Draw the picture
 
     cli                                 ; Enable interrupts
@@ -240,11 +246,63 @@ EmptyHandler:
 .define MapSize 2048
 .define PalSize 32
 .define PalAndMapSectionWithinBank $7e0235
+LastTileBankToFirst:
 DisplayPicture:   
     php
     lda		#$80
     sta		$2100  ; Enable forced blanking
     
+    lda GoingForward                                ; If we haven't done anything yet, don't modify anything and display the title.
+    cmp #$02
+    beq DoneDeterminingDirection
+    
+    lda GoingForward                                ; Are we going forward? Branch to we are going forward.
+    cmp #$01
+    beq WeAreGoingForward
+    
+    lda TileDataSection                             ; If backwards, load TileDataSection and compare it to FirstTileDataSection
+    cmp #FirstTilBank
+    bne NotFirstBank                                ; If not first bank, go to NotFirstBank
+    
+    lda #LastPictureBank                             ; If it is the first bank, however, load the LastPictureBank and store it in TileDataSection
+    sta TileDataSection
+    bra DoneDeterminingDirection
+
+NotFirstBank:
+    dec TileDataSection                             ; Otherwise, decrement TileDataSection, go to previous picture.
+    bra DoneDeterminingDirection
+WeAreGoingForward:
+
+    lda TileDataSection                             ; We're going forward. Are we on the last picture bank
+    cmp #LastPictureBank
+    bne NotLastBank                                 ; If not, go to NotLastBank (which increments TileDataSection)
+   
+    lda #FirstTilBank                           ; If so, Put FirstTilBank in TileDataSection (the title screen) and we're done.
+    sta TileDataSection
+    bra DoneDeterminingDirection
+
+NotLastBank:
+    inc TileDataSection                             ; Increment TileDataSection if it's not the last bank.
+DoneDeterminingDirection:   
+TileDataSectionCode:
+    lda #$00
+    pha
+    plb
+    lda 	TileDataSection                ; Load TileDataSection
++   sec                                 ; Subtract it by the amount of banks it is away from 0.
+    sbc #FirstTileDataSection
+    asl                                 ; Multiply by 2 (table is 2 bytes)
+    rep #$20                            ; Change A to 16-bit
+    and #$00FF                          ; Make sure the high byte is zeroed out.
+    ldx.w 0                             ; Unnecessary. For superstition only.
+    tax                                 ; Transfer A to X
+    sep #$20                            ; Change A to 8-bit
+
+    lda PalMapLocData.w,x               ; Load bank byte of palette and map data.
+    sta PalAndMapBank                   ; Store it in PalAndMapBank
+    lda PalMapLocDataByte2.w,x          ; Load image number within bank from table
+    sta PalAndMapSectionWithinBank      ; Store into PalAndMapSectionWithinBank
+     
     lda     PalAndMapBank               ; Load which Palette and Map Bank we're on
     pha                                 ; Put it in the data bank register
     plb
@@ -325,49 +383,39 @@ MapPointerLoop:
     stx         $4315
     lda 	#%00000010
     sta 	$420b
-    
-    inc TileDataSection
-     
+   
+
+
     ; Use graphics mode 1
 
     lda         #$01
     sta         $2105
 
 
-    lda.l PalAndMapSectionWithinBank      ; There are 15 (0 - 14) picture sections in a bank.
-    cmp #14                               ; Check if we're on the last bank
-    bne Not14                             ; If not, skip
-    lda #$00                              ; If so, set picture section within bank to 0
-    sta.l PalAndMapSectionWithinBank         
-    lda PalAndMapBank                     ; Increment the bank we're on, and put it in data bank register
-    inc a
-    pha
-    plb
-    sta PalAndMapBank
-    bra TileDataSectionCode                ; Skip to next section
-Not14:
-    inc a
-    sta.l PalAndMapSectionWithinBank
-
-TileDataSectionCode:
-    lda 	TileDataSection               ; Load TileDataSection
-    cmp 	#LastPictureBank             ; Is it the last picture bank?
-    bcc 	+                            ; If not, skip to end.
-
-    lda     #$00                         ; Load first picture section within bank
-    sta.l     PalAndMapSectionWithinBank          
-    lda 	#FirstTileDataSection         ; Load first picture
-    sta 	TileDataSection
-    lda     #$01                         ; Set the bank to the first Palette and Map bank
-    sta     PalAndMapBank
-    pha                                  ; Change the data bank to this bank.
-    plb
+;    lda.l PalAndMapSectionWithinBank      ; There are 15 (0 - 14) picture sections in a bank.
+;    cmp #14                               ; Check if we're on the last bank
+;    bne Not14                             ; If not, skip
+;    lda #$00                              ; If so, set picture section within bank to 0
+;    sta.l PalAndMapSectionWithinBank         
+;    lda PalAndMapBank                     ; Increment the bank we're on, and put it in data bank register;
+;    inc a
+;    pha
+;    plb
+;    sta PalAndMapBank
+;    bra TileDataSectionCode                ; Skip to next section
+;Not14:
+;    inc a
+;    sta.l PalAndMapSectionWithinBank
 
 
-+   lda 	#$0f
+
+
+
+    lda 	#$0f
     sta		$2100                        ; Disable forced blank
 
     plp		
+
 
     rts                                  ; Return from subroutine 
 
@@ -376,25 +424,46 @@ TileDataSectionCode:
 
 NMI:
    lda          DoingTransition              ; Are we doing the transition?
-   cmp          #$01
-   bne          +                            ; If so, go/continue mosaic transition
-
-   jsr 		DoTransition
-
-+  lda		$4218                            ; Check controller for button presses
    cmp          #$00
-   beq          +
+   beq          +                            ; If NOT, SKIP
 
-   lda          #$01                         ; If there has been a button press, we're doing a transition
-   sta          DoingTransition 
+   jsr  		DoTransition
+
++  
+JoyLoop:
+   lda          $4212
+   and          #$01
+   bne          JoyLoop
    
-+  rti                                       ; Return to non-VBlank loop
+   lda  		$4219                        ; Check controller for button presses
+   and          #$02
+   cmp          #$02
+   beq          LeftPressed
+   lda          $4219
+   and          #$01
+   cmp          #$01
+   beq          RightPressed
 
 
-
+   
+EndInt:  
+   rti                                       ; Return to non-VBlank loop
+LeftPressed:
+   lda #$00                                  ;Left has been pressed, we're going backward
+   sta GoingForward 
+   lda #$01
+   sta DoingTransition                       ;And we're doing a transition.
+   rti
+RightPressed:
+   lda #$01                                  ;Right has been Pressed, we're going forward
+   sta GoingForward
+   lda #$01
+   sta DoingTransition
+   rti
 DoTransition:
    php
    lda          MosaicDir                    ; See if mosaic direction is down
+
    cmp          #$00
    beq          MosaicDown                   ; If so, go to MosaicDown
 MosaicUp:
@@ -461,6 +530,107 @@ ChangeMosaicToUp
    rts
 
 zerobyte: .byte 1
+
+PalMapLocData:
+;This is a table of information about each image. The first byte is the bank for the palette and map data, the second byte is the image within the bank.
+;Bank 1
+.db 1
+PalMapLocDataByte2:
+.db 0
+.db 1, 1 
+.db 1, 2
+.db 1, 3
+.db 1, 4
+.db 1, 5
+.db 1, 6
+.db 1, 7
+.db 1, 8
+.db 1, 9
+.db 1, 10
+.db 1, 11
+.db 1, 12
+.db 1, 13
+.db 1, 14
+
+;Bank 2
+
+.db 2, 0
+.db 2, 1
+.db 2, 2
+.db 2, 3
+.db 2, 4
+.db 2, 5
+.db 2, 6
+.db 2, 7
+.db 2, 8
+.db 2, 9
+.db 2, 10
+.db 2, 11
+.db 2, 12
+.db 2, 13
+.db 2, 14
+
+;Bank 3
+
+.db 3, 0
+.db 3, 1
+.db 3, 2
+.db 3, 3
+.db 3, 4
+.db 3, 5
+.db 3, 6
+.db 3, 7
+.db 3, 8
+.db 3, 9
+.db 3, 10
+.db 3, 11
+.db 3, 12
+.db 3, 13
+.db 3, 14
+
+;Bank 4
+
+.db 4, 0
+.db 4, 1
+.db 4, 2
+.db 4, 3
+.db 4, 4
+.db 4, 5
+.db 4, 6
+.db 4, 7
+.db 4, 8
+.db 4, 9
+.db 4, 10
+.db 4, 11
+.db 4, 12
+.db 4, 13
+.db 4, 14
+
+;Bank 5
+
+.db 5, 0
+.db 5, 1
+.db 5, 2
+.db 5, 3
+.db 5, 4
+.db 5, 5
+.db 5, 6
+.db 5, 7
+.db 5, 8
+.db 5, 9
+.db 5, 10
+.db 5, 11
+.db 5, 12
+.db 5, 13
+.db 5, 14
+
+;Bank 6
+
+.db 6, 0
+.db 6, 1
+.db 6, 2
+.db 6, 3
+.db 6, 4
 
 .ends
 .BANK 1 SLOT 0
@@ -1268,7 +1438,7 @@ frame77chr: .incbin "assets/til/hell-77.til"
 frame78chr: .incbin "assets/til/hell-78.til"
 .ends
 
-.BANK 87 SLOT 0
+.BANK 86 SLOT 0
 .ORG $0
 .section "IMAGE79" force
 frame79chr: .incbin "assets/til/hell-79.til"
